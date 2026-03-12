@@ -40,6 +40,8 @@ def convert_csv_to_rag_txt(
             location = (row.get("Location") or "").strip()
             sale_type = (row.get("Sale_Type") or "").strip()
             description = normalize_description(row.get("Description") or "")
+            # New parsed property details block (may be empty or missing for older CSVs)
+            property_details = normalize_description(row.get("Property_Details") or "")
             agents = (row.get("Agents") or "").strip()
 
             f_out.write(f"Listing ID: {listing_id}\n")
@@ -51,6 +53,10 @@ def convert_csv_to_rag_txt(
                 f_out.write(description + "\n")
             else:
                 f_out.write("(No description)\n")
+            # Only write property details section if we have anything non-empty
+            if property_details:
+                f_out.write("Property details:\n")
+                f_out.write(property_details + "\n")
             f_out.write(f"Agents: {agents}\n")
             f_out.write("\n---\n\n")
 

@@ -29,12 +29,14 @@ def output_path_with_date(path_str: str) -> str:
     return str(p.parent / f"{p.stem}_{date.today().isoformat()}{p.suffix}")
 
 
-# CSV columns matching requirements: location, sale type, description, all agent name:number, url
+# CSV columns: URL, location, sale type, description,
+# parsed property details block, all agent name:number.
 OUTPUT_FIELDS = [
     "URL",
     "Location",
     "Sale_Type",
     "Description",
+    "Property_Details",
     "Agents",
 ]
 
@@ -50,6 +52,42 @@ async def get_text(page, selector: str, default: str = "") -> str:
     return default
 
 
+def parse_property_details(raw_text: str) -> dict:
+    """Parse 'Property details' block into individual key-value fields."""
+    details = {}
+    if not raw_text:
+        return details
+    for line in raw_text.split("\n"):
+        line = line.strip()
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        key_lower = key.lower()
+        if "property type" in key_lower:
+            details["Property_Type"] = val
+        elif key_lower == "rent":
+            details["Rent"] = val
+        elif key_lower == "bedrooms":
+            details["Bedrooms"] = val
+        elif key_lower == "bathrooms":
+            details["Bathrooms"] = val
+        elif "garag" in key_lower:
+            details["Garaging"] = val
+        elif "carport" in key_lower:
+            details["Carport"] = val
+        elif "off street" in key_lower or "off-street" in key_lower:
+            details["Off_Street_Parking"] = val
+        elif "furnished" in key_lower:
+            details["Furnished"] = val
+        elif "pets" in key_lower:
+            details["Pets"] = val
+        elif "property id" in key_lower:
+            details["Property_ID"] = val
+    return details
+
+
 async def scrape_listing(browser, url: str, index: int, total: int):
     """Scrape a single listing URL using its own Playwright page."""
     print(f"[{index}/{total}] Scraping: {url}", flush=True)
@@ -57,7 +95,14 @@ async def scrape_listing(browser, url: str, index: int, total: int):
     try:
         try:
             await page.goto(url, timeout=60000)
-            await page.wait_for_timeout(3000)
+            # Wait for the main listing summary section to ensure core content is loaded,
+            # then give the page a little extra time to stabilise.
+            try:
+                await page.wait_for_selector("section.listingdetailssummary", timeout=15000)
+            except Exception:
+                # Not all templates may have this exact selector; continue anyway.
+                pass
+            await page.wait_for_timeout(2000)
         except Exception as e:
             print(f"  ⚠ Failed to load: {e}")
             return {**dict.fromkeys(OUTPUT_FIELDS, ""), "URL": url}
@@ -65,92 +110,18 @@ async def scrape_listing(browser, url: str, index: int, total: int):
         # --- Location (property title/address) ---
         location = await get_text(page, "h1")
 
-        # --- Sale type / price banner (e.g. "For Sale $430,000", "For sale by negotiation", "Deadline sale") ---
-        sale_type = ""
-        try:
-            sale_pattern = re.compile(
-                r"(for sale|sale by|deadline sale|auction|tender)",
-                re.IGNORECASE,
-            )
-            # Treat BER labels etc. as non‑price noise when choosing the value
-            ber_pattern = re.compile(r"\bber\b", re.IGNORECASE)
+        # --- Sale type / banner (simple heading-based selector as in your new code) ---
+        sale_type = await get_text(page, "h3 span[data-attr-test=\"listing-sub-heading\"]")
+        if not sale_type:
+            sale_type = await get_text(page, "h3")
 
-            # Common containers for price / sale info
-            sale_locators = page.locator(
-                "[class*='price'], [class*='sale'], [data-testid*='price'], .price, .tagline, .listing-price, header *, h2, h3"
-            )
-            texts = await sale_locators.all_inner_texts()
+        # --- Description (simple description-wrapper block) ---
+        description = await get_text(page, "div.description-wrapper")
 
-            # 1) Prefer lines that actually contain a $ price and are not BER-only labels
-            for text in texts:
-                text = (text or "").strip()
-                if not text:
-                    continue
-                if "$" in text and not ber_pattern.search(text):
-                    sale_type = text[:160]
-                    break
-
-            # 2) Otherwise, fall back to generic sale keywords, still avoiding BER-only labels
-            if not sale_type:
-                for text in texts:
-                    text = (text or "").strip()
-                    if (
-                        text
-                        and sale_pattern.search(text)
-                        and len(text) < 160
-                        and not ber_pattern.search(text)
-                    ):
-                        sale_type = text
-                        break
-
-            # 3) Fallback: scan body text for a nearby line containing a price/sale keyword
-            if not sale_type:
-                full = (await page.inner_text("body")).strip()
-                match = sale_pattern.search(full)
-                if match:
-                    start = max(0, match.start() - 60)
-                    end = min(len(full), match.end() + 60)
-                    snippet = full[start:end]
-                    lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
-                    if lines:
-                        # Prefer a line with an actual $ amount
-                        chosen = ""
-                        for ln in lines:
-                            if "$" in ln and not ber_pattern.search(ln):
-                                chosen = ln
-                                break
-                        # Otherwise, use the first line with sale keywords, still avoiding BER
-                        if not chosen:
-                            for ln in lines:
-                                if sale_pattern.search(ln) and not ber_pattern.search(ln):
-                                    chosen = ln
-                                    break
-                        # Final fallback: first non-empty line from the snippet
-                        if not chosen:
-                            chosen = lines[0]
-                        sale_type = chosen[:160]
-        except Exception:
-            pass
-
-        # --- Description ---
-        description = ""
-        for selector in (
-            "[class*='description']",
-            "section[aria-label*='escription']",
-            "[data-testid*='description']",
-            "section",
-        ):
-            description = await get_text(page, selector)
-            # Prefer a block that looks like prose (multiple words, not just one line)
-            if description and len(description) > 80 and " " in description:
-                break
-        if not description:
-            try:
-                desc_loc = page.locator("section").nth(1)
-                if await desc_loc.count() > 0:
-                    description = (await desc_loc.inner_text()).strip()
-            except Exception:
-                pass
+        # --- Property details block (parsed into key/value pairs) ---
+        raw_details = await get_text(page, "section.ListingPropertyDetails")
+        details = parse_property_details(raw_details)
+        property_details_str = "\n".join(f"{k}: {v}" for k, v in details.items())
 
         # --- Agents: all "name : phone" pairs in a single column ---
         agents = []
@@ -237,6 +208,7 @@ async def scrape_listing(browser, url: str, index: int, total: int):
             "Location": location,
             "Sale_Type": sale_type,
             "Description": description,
+            "Property_Details": property_details_str,
             "Agents": agents_str,
         }
     finally:
