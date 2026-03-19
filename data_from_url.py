@@ -1,3 +1,4 @@
+
 import asyncio
 import argparse
 import csv
@@ -7,8 +8,8 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-INPUT_FILE = "test.csv"
-OUTPUT_FILE = "barfoot_rural_data.csv"
+INPUT_FILE = "url/barfoot_rental_available_now_urls.csv"
+OUTPUT_FILE = "data_csv/barfoot_rental_available_now_data.csv"
 CONCURRENCY = 1  # how many listings to scrape in parallel
 
 # Predefined jobs: input URL CSV -> output data CSV
@@ -53,7 +54,12 @@ async def get_text(page, selector: str, default: str = "") -> str:
 
 
 def parse_property_details(raw_text: str) -> dict:
-    """Parse 'Property details' block into individual key-value fields."""
+    """Parse 'Property details' block into key-value fields.
+
+    Made dynamic so it works for any property type:
+    whatever label appears on the page (e.g. 'Land area', '3 phase power')
+    becomes a key in the dict.
+    """
     details = {}
     if not raw_text:
         return details
@@ -64,27 +70,13 @@ def parse_property_details(raw_text: str) -> dict:
         key, _, val = line.partition(":")
         key = key.strip()
         val = val.strip()
-        key_lower = key.lower()
-        if "property type" in key_lower:
-            details["Property_Type"] = val
-        elif key_lower == "rent":
-            details["Rent"] = val
-        elif key_lower == "bedrooms":
-            details["Bedrooms"] = val
-        elif key_lower == "bathrooms":
-            details["Bathrooms"] = val
-        elif "garag" in key_lower:
-            details["Garaging"] = val
-        elif "carport" in key_lower:
-            details["Carport"] = val
-        elif "off street" in key_lower or "off-street" in key_lower:
-            details["Off_Street_Parking"] = val
-        elif "furnished" in key_lower:
-            details["Furnished"] = val
-        elif "pets" in key_lower:
-            details["Pets"] = val
-        elif "property id" in key_lower:
-            details["Property_ID"] = val
+
+        # Use the on-page label as the key so that
+        # any new/unknown fields are still captured.
+        # Example keys: "Location", "Land area", "3 phase power",
+        # "Air conditioning", "Container access", "Property ID", etc.
+        if key and val:
+            details[key] = val
     return details
 
 
@@ -219,7 +211,8 @@ async def scrape(input_file: str = INPUT_FILE, output_file: str = OUTPUT_FILE):
     print(f"\nLoading URLs from {input_file} ...", flush=True)
     # Read URLs from CSV (skip header row for URL column)
     urls = []
-    with open(input_file, newline="", encoding="utf-8") as f:
+    # Use utf-8-sig so files that include a UTF-8 BOM are handled correctly.
+    with open(input_file, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             url = row.get("URL", "").strip()
